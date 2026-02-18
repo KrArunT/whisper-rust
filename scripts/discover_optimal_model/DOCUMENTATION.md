@@ -116,7 +116,7 @@ This document covers all files and functions used by the discovery benchmark flo
 | `run_timed_quiet_with_optional_pinning()` | Same as above but with quiet stdout and captured stderr. |
 | `compute_threading_plan()` | Computes bounded `MODEL_INTRA_OP` and `MODEL_CHUNK_PARALLELISM` so combined concurrency does not exceed pinned cores by default. |
 | `initialize_merged_csv()` | Writes merged CSV header. |
-| `generate_baseline_transcripts()` | Runs baseline model transcription and computes baseline metrics. |
+| `generate_baseline_transcripts()` | Reuses existing `baseline_all.txt` when present; otherwise runs baseline transcription and stores timing/memory in `baseline_metrics.env`. |
 | `run_model_benchmark(onnx_dir)` | Runs one model benchmark and appends one merged CSV row. |
 | `benchmark_optimized_models()` | Iterates model directories (sorted) and benchmarks each. |
 | `select_best_models()` | Selects best rows for latency, memory, WER, and CER. |

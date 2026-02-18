@@ -13,6 +13,9 @@ Standalone repository to benchmark optimized Whisper ONNX Runtime models on CPU 
 3. Compute WER/CER against baseline.
 4. Produce merged CSV + markdown report.
 
+If `results/benchmarks/without_hf_pipeline_rust/baseline_whisper_<model>/baseline_all.txt` already exists,
+the baseline transcription step is skipped and reused.
+
 ## Repository Layout
 
 - `discover_optimal_model.sh`: main entrypoint
@@ -99,6 +102,7 @@ Primary artifacts:
 - `merged_inference_results.csv`
 - `BENCHMARK_REPORT.md`
 - `baseline_whisper_<model>/baseline_all.txt`
+- `baseline_whisper_<model>/baseline_metrics.env`
 - `per_model/<model>/inference_per_file.csv`
 - `per_model/<model>/inference_per_file.json`
 - `per_model/<model>/inference_summary.json`

@@ -12,6 +12,7 @@ setup_runtime_paths() {
 
   BASELINE_DIR="$RESULTS_ROOT/baseline_whisper_${BASELINE_MODEL}"
   BASELINE_ALL_TXT="$BASELINE_DIR/baseline_all.txt"
+  BASELINE_METRICS_ENV="$BASELINE_DIR/baseline_metrics.env"
   BASELINE_TIME_LOG="$TMP_DIR/time_baseline.txt"
 }
 
@@ -108,10 +109,16 @@ initialize_merged_csv() {
 
 # Generate baseline transcripts and baseline timing/memory summary metrics.
 generate_baseline_transcripts() {
-  echo "🎯 Generating baseline transcripts with OpenAI Whisper '${BASELINE_MODEL}'..."
-  run_timed_with_optional_pinning \
-    "$BASELINE_TIME_LOG" \
-    uv run python "$PY_HELPER" baseline "$AUDIO_DIR" "$BASELINE_DIR" "$BASELINE_MODEL" "$BASELINE_LANG"
+  local baseline_cache_hit=0
+  if [[ -s "$BASELINE_ALL_TXT" ]]; then
+    baseline_cache_hit=1
+    echo "♻️ Reusing existing baseline transcripts: $BASELINE_ALL_TXT"
+  else
+    echo "🎯 Generating baseline transcripts with OpenAI Whisper '${BASELINE_MODEL}'..."
+    run_timed_with_optional_pinning \
+      "$BASELINE_TIME_LOG" \
+      uv run python "$PY_HELPER" baseline "$AUDIO_DIR" "$BASELINE_DIR" "$BASELINE_MODEL" "$BASELINE_LANG"
+  fi
 
   if [[ ! -f "$BASELINE_ALL_TXT" ]]; then
     echo "❌ Baseline transcript missing: $BASELINE_ALL_TXT" >&2
@@ -124,9 +131,26 @@ generate_baseline_transcripts() {
     exit 1
   fi
 
-  BASELINE_TOTAL_SEC="$(elapsed_wall_time_from_log "$BASELINE_TIME_LOG")"
-  BASELINE_AVG_SEC="$(awk -v t="$BASELINE_TOTAL_SEC" -v n="$BASELINE_AUDIO_COUNT" 'BEGIN{ if (n>0) printf "%.6f", t/n; else printf "0" }')"
-  BASELINE_PEAK_MB="$(peak_memory_mb_from_log "$BASELINE_TIME_LOG")"
+  if (( baseline_cache_hit == 0 )); then
+    BASELINE_TOTAL_SEC="$(elapsed_wall_time_from_log "$BASELINE_TIME_LOG")"
+    BASELINE_AVG_SEC="$(awk -v t="$BASELINE_TOTAL_SEC" -v n="$BASELINE_AUDIO_COUNT" 'BEGIN{ if (n>0) printf "%.6f", t/n; else printf "0" }')"
+    BASELINE_PEAK_MB="$(peak_memory_mb_from_log "$BASELINE_TIME_LOG")"
+    cat > "$BASELINE_METRICS_ENV" <<EOF
+BASELINE_TOTAL_SEC=$BASELINE_TOTAL_SEC
+BASELINE_AVG_SEC=$BASELINE_AVG_SEC
+BASELINE_PEAK_MB=$BASELINE_PEAK_MB
+EOF
+  else
+    if [[ -s "$BASELINE_METRICS_ENV" ]]; then
+      # shellcheck disable=SC1090
+      source "$BASELINE_METRICS_ENV"
+    else
+      BASELINE_TOTAL_SEC="NA"
+      BASELINE_AVG_SEC="NA"
+      BASELINE_PEAK_MB="NA"
+    fi
+  fi
+
   BASELINE_WER="0.000000"
   BASELINE_CER="0.000000"
 
@@ -221,6 +245,17 @@ select_best_models() {
 
 # Render markdown report from aggregated benchmark and baseline metrics.
 write_markdown_report() {
+  local baseline_total_fmt baseline_avg_fmt baseline_ram_fmt baseline_ram_cell
+  baseline_total_fmt="$(pretty_time "$BASELINE_TOTAL_SEC")"
+  baseline_avg_fmt="$(pretty_time "$BASELINE_AVG_SEC")"
+  if [[ -z "${BASELINE_PEAK_MB:-}" || "$BASELINE_PEAK_MB" == "NA" ]]; then
+    baseline_ram_fmt="NA"
+    baseline_ram_cell="NA"
+  else
+    baseline_ram_fmt="${BASELINE_PEAK_MB}MB"
+    baseline_ram_cell="${BASELINE_PEAK_MB}MB"
+  fi
+
   {
     echo "# ⚡ Whisper ONNX Inference Benchmark"
     echo
@@ -230,23 +265,29 @@ write_markdown_report() {
     echo
     echo "## 📌 Baseline Metrics"
     echo "- Files: **$BASELINE_AUDIO_COUNT**"
-    echo "- Time (total): **$(pretty_time "$BASELINE_TOTAL_SEC")**"
-    echo "- Time (avg/audio): **$(pretty_time "$BASELINE_AVG_SEC")**"
-    echo "- RAM (peak): **${BASELINE_PEAK_MB}MB**"
+    echo "- Time (total): **${baseline_total_fmt}**"
+    echo "- Time (avg/audio): **${baseline_avg_fmt}**"
+    echo "- RAM (peak): **${baseline_ram_fmt}**"
     echo "- WER/CER (vs baseline): **$(pretty_score "$BASELINE_WER")** / **$(pretty_score "$BASELINE_CER")**"
     echo
     echo "| Implementation | Precision | Optimization | Instruction Set | Beam size | Time | RAM Usage | WER | CER |"
     echo "|---------------|-----------|--------------|-----------------|-----------|------|-----------|-----|-----|"
 
-    printf "| %s | %s | %s | %s | %s | %s | %sMB | %s | %s |\n" \
+    printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
       "openai-whisper python" "fp32" "baseline" "NA" "NA" \
-      "$(pretty_time "$BASELINE_AVG_SEC")" "$BASELINE_PEAK_MB" \
+      "${baseline_avg_fmt}" "${baseline_ram_cell}" \
       "$(pretty_score "$BASELINE_WER")" "$(pretty_score "$BASELINE_CER")"
 
     tail -n +2 "$MERGED_MODEL_CSV" | sort -t, -k2,2 -k3,3V -k4,4 | \
       while IFS=, read -r impl prec opt isa beam t ram wer cer; do
-        printf "| %s | %s | %s | %s | %s | %s | %sMB | %s | %s |\n" \
-          "$impl" "$prec" "$opt" "$isa" "$beam" "$(pretty_time "$t")" "$ram" "$(pretty_score "$wer")" "$(pretty_score "$cer")"
+        ram_cell="NA"
+        if [[ -z "${ram:-}" || "$ram" == "NA" ]]; then
+          ram_cell="NA"
+        else
+          ram_cell="${ram}MB"
+        fi
+        printf "| %s | %s | %s | %s | %s | %s | %s | %s | %s |\n" \
+          "$impl" "$prec" "$opt" "$isa" "$beam" "$(pretty_time "$t")" "$ram_cell" "$(pretty_score "$wer")" "$(pretty_score "$cer")"
       done
 
     echo

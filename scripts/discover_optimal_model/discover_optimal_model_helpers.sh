@@ -12,6 +12,9 @@ time_to_seconds() {
 # Format seconds for human-readable report output.
 pretty_time() {
   awk -v t="$1" 'BEGIN{
+    if (t=="" || t=="NA") { printf "NA"; exit }
+    if (t !~ /^([0-9]+([.][0-9]+)?|[.][0-9]+)$/) { printf "NA"; exit }
+    t=t+0
     if (t < 60) printf "%.2fs", t
     else printf "%dm%.2fs", int(t/60), (t - (int(t/60) * 60))
   }'
