@@ -15,6 +15,8 @@ load_discover_config() {
   NUM_BEAMS="${NUM_BEAMS:-1}"
   BENCHMARK_LANG="${BENCHMARK_LANG:-en}"
   RUST_CHUNK_PARALLELISM="${RUST_CHUNK_PARALLELISM:-1}"
+  MODEL_PROGRESS_INTERVAL_SEC="${MODEL_PROGRESS_INTERVAL_SEC:-30}" # heartbeat interval while model run is active
+  METRICS_TIMEOUT_SEC="${METRICS_TIMEOUT_SEC:-600}"               # timeout for WER/CER computation; 0 disables
   PIN_DEBUG="${PIN_DEBUG:-0}"                           # 1 prints selected CPU topology diagnostics
   PIN_STRICT_PHYSICAL_CORES="${PIN_STRICT_PHYSICAL_CORES:-0}" # 1 rejects SMT sibling selection
 

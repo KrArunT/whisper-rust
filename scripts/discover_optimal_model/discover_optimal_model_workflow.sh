@@ -69,11 +69,32 @@ run_timed_with_optional_pinning() {
 run_timed_quiet_with_optional_pinning() {
   local time_log="$1"
   local stderr_log="$2"
+  local interval="${MODEL_PROGRESS_INTERVAL_SEC:-30}"
+  local run_label="${CURRENT_RUN_LABEL:-command}"
+  local start_ts elapsed pid
+  local -a cmd=()
   shift 2
+
   if [[ -n "$TASKSET_CPU_LIST" ]]; then
-    /usr/bin/time -v -o "$time_log" taskset -c "$TASKSET_CPU_LIST" "$@" 1>/dev/null 2>"$stderr_log"
+    cmd=(taskset -c "$TASKSET_CPU_LIST" "$@")
   else
-    /usr/bin/time -v -o "$time_log" "$@" 1>/dev/null 2>"$stderr_log"
+    cmd=("$@")
+  fi
+
+  if [[ "$interval" =~ ^[0-9]+$ ]] && (( interval > 0 )); then
+    /usr/bin/time -v -o "$time_log" "${cmd[@]}" 1>/dev/null 2>"$stderr_log" &
+    pid=$!
+    start_ts="$(date +%s)"
+    while kill -0 "$pid" 2>/dev/null; do
+      sleep "$interval"
+      if kill -0 "$pid" 2>/dev/null; then
+        elapsed="$(( $(date +%s) - start_ts ))"
+        echo "⏳ ${run_label} still running (${elapsed}s elapsed)"
+      fi
+    done
+    wait "$pid"
+  else
+    /usr/bin/time -v -o "$time_log" "${cmd[@]}" 1>/dev/null 2>"$stderr_log"
   fi
 }
 
@@ -180,6 +201,7 @@ run_model_benchmark() {
   mkdir -p "$model_tmp_dir"
   compute_threading_plan
 
+  CURRENT_RUN_LABEL="model ${model_name}"
   run_timed_quiet_with_optional_pinning \
     "$time_log" \
     "$run_err" \
@@ -197,6 +219,7 @@ run_model_benchmark() {
       --out-csv "$model_csv" \
       --out-json "$model_json" \
       --out-summary-json "$model_summary"
+  unset CURRENT_RUN_LABEL
 
   wall_time_sec="$(elapsed_wall_time_from_log "$time_log")"
   avg_time_sec="$(uv run python "$PY_HELPER" avg_latency_csv "$model_csv" || true)"
@@ -212,8 +235,16 @@ run_model_benchmark() {
   isa_label="$(instruction_set_from_model "$model_name")"
   impl="$(implementation_name)"
 
-  metrics="$(uv run python "$PY_HELPER" metrics_csv "$BASELINE_ALL_TXT" "$model_csv" "$hyp_clean" || true)"
+  echo "🧮 Computing WER/CER for $model_name..."
+  if [[ "${METRICS_TIMEOUT_SEC:-0}" =~ ^[0-9]+$ ]] && (( METRICS_TIMEOUT_SEC > 0 )) && command -v timeout >/dev/null 2>&1; then
+    metrics="$(timeout "$METRICS_TIMEOUT_SEC" uv run python "$PY_HELPER" metrics_csv "$BASELINE_ALL_TXT" "$model_csv" "$hyp_clean" || true)"
+  else
+    metrics="$(uv run python "$PY_HELPER" metrics_csv "$BASELINE_ALL_TXT" "$model_csv" "$hyp_clean" || true)"
+  fi
   if [[ -z "${metrics:-}" ]]; then
+    if [[ -f "$hyp_clean" ]]; then
+      echo "⚠️ Metrics unavailable for $model_name (timeout/error). Recording WER/CER as NA."
+    fi
     wer="NA"
     cer="NA"
   else

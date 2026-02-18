@@ -75,6 +75,12 @@ PIN_MODE=none ./discover_optimal_model.sh
 # Bound chunk-level parallelism (default: 1)
 RUST_CHUNK_PARALLELISM=1 ./discover_optimal_model.sh
 
+# Print heartbeat while each model benchmark is running (seconds)
+MODEL_PROGRESS_INTERVAL_SEC=30 ./discover_optimal_model.sh
+
+# Bound WER/CER metrics runtime per model (seconds, 0 disables timeout)
+METRICS_TIMEOUT_SEC=600 ./discover_optimal_model.sh
+
 # Print pinning topology diagnostics (useful on SMT/EPYC systems)
 PIN_MODE=cpu_set CPU_SET=0-7 PIN_DEBUG=1 ./discover_optimal_model.sh
 

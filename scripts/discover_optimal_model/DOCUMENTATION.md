@@ -43,7 +43,7 @@ This document covers all files and functions used by the discovery benchmark flo
 
 | Function | Description |
 |---|---|
-| `load_discover_config()` | Loads defaults, normalizes `PIN_MODE`, maps legacy env vars, and sets baseline/benchmark language, beam config, chunk parallelism controls, and pinning debug/SMT strictness flags. |
+| `load_discover_config()` | Loads defaults, normalizes `PIN_MODE`, maps legacy env vars, and sets baseline/benchmark language, beam config, chunk parallelism controls, model-progress heartbeat, metrics timeout, and pinning debug/SMT strictness flags. |
 
 ### `scripts/discover_optimal_model/discover_optimal_model_helpers.sh`
 
@@ -113,7 +113,7 @@ This document covers all files and functions used by the discovery benchmark flo
 | `initialize_benchmark_workspace()` | Backs up previous results and prepares output directories. |
 | `initialize_python_helper()` | Resolves helper path and validates Python syntax. |
 | `run_timed_with_optional_pinning()` | Executes a command under `/usr/bin/time`, optionally pinned with taskset. |
-| `run_timed_quiet_with_optional_pinning()` | Same as above but with quiet stdout and captured stderr. |
+| `run_timed_quiet_with_optional_pinning()` | Same as above but with quiet stdout, captured stderr, and periodic heartbeat logs while the command is active. |
 | `compute_threading_plan()` | Computes bounded `MODEL_INTRA_OP` and `MODEL_CHUNK_PARALLELISM` so combined concurrency does not exceed pinned cores by default. |
 | `initialize_merged_csv()` | Writes merged CSV header. |
 | `generate_baseline_transcripts()` | Reuses existing `baseline_all.txt` when present; otherwise runs baseline transcription and stores timing/memory in `baseline_metrics.env`. |
