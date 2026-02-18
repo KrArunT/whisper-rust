@@ -1,0 +1,9 @@
+[project]
+name = "rust-ort-fix"
+version = "0.1.0"
+description = "Standalone Whisper ONNX Runtime benchmark and model discovery utilities."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "openai-whisper>=20240930",
+]

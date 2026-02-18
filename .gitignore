@@ -1,0 +1,25 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Bench outputs
+results/benchmarks/**/backups/
+results/benchmarks/**/*.tmp
+
+# Large local assets (keep out of repo)
+models/**
+!models/.gitkeep
+results/**
+!results/.gitkeep
+audio/**
+!audio/.gitkeep
+
+# OS/editor
+.DS_Store
+.vscode/
+.idea/
