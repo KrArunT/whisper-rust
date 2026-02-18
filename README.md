@@ -72,6 +72,12 @@ PIN_MODE=none ./discover_optimal_model.sh
 # Bound chunk-level parallelism (default: 1)
 RUST_CHUNK_PARALLELISM=1 ./discover_optimal_model.sh
 
+# Print pinning topology diagnostics (useful on SMT/EPYC systems)
+PIN_MODE=cpu_set CPU_SET=0-7 PIN_DEBUG=1 ./discover_optimal_model.sh
+
+# Fail if selection includes SMT siblings from the same physical core
+PIN_MODE=cpu_set CPU_SET=0-7 PIN_STRICT_PHYSICAL_CORES=1 ./discover_optimal_model.sh
+
 # Change Rust decode language (default: en)
 BENCHMARK_LANG=en ./discover_optimal_model.sh
 ```

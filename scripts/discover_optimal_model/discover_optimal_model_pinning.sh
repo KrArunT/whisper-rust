@@ -11,6 +11,80 @@ is_positive_int() {
   [[ "$1" =~ ^[1-9][0-9]*$ ]]
 }
 
+# Read package/core/node metadata for one CPU, printing "package,core,node".
+cpu_topology_triplet() {
+  local cpu="$1"
+  local pkg core node node_path
+
+  pkg="NA"
+  core="NA"
+  node="NA"
+
+  [[ -r "/sys/devices/system/cpu/cpu${cpu}/topology/physical_package_id" ]] && pkg="$(cat "/sys/devices/system/cpu/cpu${cpu}/topology/physical_package_id")"
+  [[ -r "/sys/devices/system/cpu/cpu${cpu}/topology/core_id" ]] && core="$(cat "/sys/devices/system/cpu/cpu${cpu}/topology/core_id")"
+
+  node_path="$(ls -d "/sys/devices/system/cpu/cpu${cpu}"/node* 2>/dev/null | head -n1 || true)"
+  if [[ -n "$node_path" ]]; then
+    node="${node_path##*node}"
+  fi
+
+  echo "${pkg},${core},${node}"
+}
+
+# Print selected CPU topology and SMT sibling details when PIN_DEBUG=1.
+emit_pinning_debug_info() {
+  local allowed_file="$1"
+  local selected_file="$2"
+  local smt_active cpu topo pkg core node siblings
+
+  [[ "${PIN_DEBUG:-0}" == "1" ]] || return 0
+
+  smt_active="NA"
+  [[ -r /sys/devices/system/cpu/smt/active ]] && smt_active="$(cat /sys/devices/system/cpu/smt/active)"
+
+  echo "🔎 [pinning] debug: smt_active=${smt_active}"
+  echo "🔎 [pinning] debug: allowed_cpus=$(paste -sd, "$allowed_file")"
+  echo "🔎 [pinning] debug: selected_cpus=$(paste -sd, "$selected_file")"
+
+  while IFS= read -r cpu; do
+    topo="$(cpu_topology_triplet "$cpu")"
+    IFS=',' read -r pkg core node <<< "$topo"
+    siblings="NA"
+    [[ -r "/sys/devices/system/cpu/cpu${cpu}/topology/thread_siblings_list" ]] && siblings="$(cat "/sys/devices/system/cpu/cpu${cpu}/topology/thread_siblings_list")"
+    echo "🔎 [pinning] cpu=${cpu} package=${pkg} core=${core} node=${node} siblings=${siblings}"
+  done < "$selected_file"
+}
+
+# Warn or fail when selected CPUs include SMT siblings from the same physical core.
+validate_distinct_physical_cores_or_warn() {
+  local selected_file="$1"
+  local strict="${PIN_STRICT_PHYSICAL_CORES:-0}"
+  local cpu topo pkg core node key first_cpu
+  local conflicts=""
+  declare -A seen_core_to_cpu
+
+  [[ -r /sys/devices/system/cpu/cpu0/topology/core_id ]] || return 0
+
+  while IFS= read -r cpu; do
+    topo="$(cpu_topology_triplet "$cpu")"
+    IFS=',' read -r pkg core node <<< "$topo"
+    key="${pkg}:${core}"
+    if [[ -n "${seen_core_to_cpu[$key]:-}" ]]; then
+      first_cpu="${seen_core_to_cpu[$key]}"
+      conflicts+="${pkg}/core${core}=cpu${first_cpu},cpu${cpu};"
+    else
+      seen_core_to_cpu["$key"]="$cpu"
+    fi
+  done < "$selected_file"
+
+  if [[ -n "$conflicts" ]]; then
+    if [[ "$strict" == "1" ]]; then
+      pinning_die "Selected CPUs include SMT siblings on the same physical core (${conflicts}). Choose one thread per core or set PIN_STRICT_PHYSICAL_CORES=0."
+    fi
+    echo "⚠️ [pinning] Selected CPUs include SMT siblings on the same physical core: ${conflicts}" >&2
+  fi
+}
+
 # Parse and normalize CPU_SET syntax (integers and ascending ranges only).
 expand_cpu_set_strict() {
   local spec="${1//[[:space:]]/}"
@@ -207,6 +281,9 @@ prepare_taskset_pinning() {
 
   TASKSET_CPU_LIST="$(paste -sd, "$selected_file")"
   [[ -n "$TASKSET_CPU_LIST" ]] || pinning_die "Selected CPU list is empty for PIN_MODE=$mode."
+
+  validate_distinct_physical_cores_or_warn "$selected_file"
+  emit_pinning_debug_info "$allowed_file" "$selected_file"
 
   PINNING_DESC="$PINNING_DESC selected_cores=${RUN_CORE_COUNT} cpus=${TASKSET_CPU_LIST}"
   echo "📌 CPU pinning enabled: $PINNING_DESC"

@@ -15,6 +15,8 @@ load_discover_config() {
   NUM_BEAMS="${NUM_BEAMS:-1}"
   BENCHMARK_LANG="${BENCHMARK_LANG:-en}"
   RUST_CHUNK_PARALLELISM="${RUST_CHUNK_PARALLELISM:-1}"
+  PIN_DEBUG="${PIN_DEBUG:-0}"                           # 1 prints selected CPU topology diagnostics
+  PIN_STRICT_PHYSICAL_CORES="${PIN_STRICT_PHYSICAL_CORES:-0}" # 1 rejects SMT sibling selection
 
   # Backward-compatible mapping from legacy controls.
   if [[ -z "$PIN_MODE_INPUT" ]]; then

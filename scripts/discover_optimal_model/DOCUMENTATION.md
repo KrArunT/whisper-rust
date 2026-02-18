@@ -43,7 +43,7 @@ This document covers all files and functions used by the discovery benchmark flo
 
 | Function | Description |
 |---|---|
-| `load_discover_config()` | Loads defaults, normalizes `PIN_MODE`, maps legacy env vars, and sets baseline/benchmark language, beam config, and chunk parallelism controls. |
+| `load_discover_config()` | Loads defaults, normalizes `PIN_MODE`, maps legacy env vars, and sets baseline/benchmark language, beam config, chunk parallelism controls, and pinning debug/SMT strictness flags. |
 
 ### `scripts/discover_optimal_model/discover_optimal_model_helpers.sh`
 
@@ -67,6 +67,9 @@ This document covers all files and functions used by the discovery benchmark flo
 |---|---|
 | `pinning_die()` | Emits pinning error and exits non-zero. |
 | `is_positive_int()` | Validates positive integer values. |
+| `cpu_topology_triplet(cpu)` | Reads package/core/node topology metadata for a CPU ID. |
+| `emit_pinning_debug_info(allowed_file, selected_file)` | Prints selected CPU topology and sibling info when `PIN_DEBUG=1`. |
+| `validate_distinct_physical_cores_or_warn(selected_file)` | Warns or fails on SMT sibling selection depending on `PIN_STRICT_PHYSICAL_CORES`. |
 | `expand_cpu_set_strict()` | Parses and validates `CPU_SET` syntax (integers + ascending ranges). |
 | `expand_core_list_strict()` | Parses and validates `CORE_LIST` syntax (explicit integer IDs only). |
 | `get_online_cpus()` | Returns online CPU IDs from sysfs (or `nproc` fallback). |
