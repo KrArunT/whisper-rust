@@ -2,36 +2,37 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_DIR="$SCRIPT_DIR/scripts/discover_optimal_model"
+PY_RUNNER="$SCRIPT_DIR/scripts/discover_optimal_model/discover_optimal_model.py"
 
-# shellcheck disable=SC1091
-source "$MODULE_DIR/discover_optimal_model_config.sh"
-# shellcheck disable=SC1091
-source "$MODULE_DIR/discover_optimal_model_helpers.sh"
-# shellcheck disable=SC1091
-source "$MODULE_DIR/discover_optimal_model_pinning.sh"
-# shellcheck disable=SC1091
-source "$MODULE_DIR/discover_optimal_model_python_helper.sh"
-# shellcheck disable=SC1091
-source "$MODULE_DIR/discover_optimal_model_workflow.sh"
+cd "$SCRIPT_DIR"
 
-# Orchestrate the full benchmark pipeline from config load to report output.
-main() {
-  load_discover_config
-  setup_runtime_paths
-  validate_benchmark_inputs
-  initialize_benchmark_workspace
+if [[ ! -f "$PY_RUNNER" ]]; then
+  echo "ERROR: Missing benchmark runner: $PY_RUNNER" >&2
+  exit 1
+fi
 
-  # Build taskset pinning plan once for all model runs.
-  prepare_taskset_pinning
+if ! PIN_PLAN_RAW="$(uv run python "$PY_RUNNER" pinning-plan)"; then
+  exit 1
+fi
 
-  initialize_python_helper
-  initialize_merged_csv
-  generate_baseline_transcripts
-  benchmark_optimized_models
-  select_best_models
-  write_markdown_report
-  print_completion_summary
-}
+mapfile -t PIN_PLAN <<< "$PIN_PLAN_RAW"
+if (( ${#PIN_PLAN[@]} < 3 )); then
+  echo "ERROR: Invalid pinning plan output from $PY_RUNNER" >&2
+  exit 1
+fi
 
-main "$@"
+TASKSET_CPU_LIST="${PIN_PLAN[0]:-}"
+RUN_CORE_COUNT="${PIN_PLAN[1]:-1}"
+PINNING_DESC="${PIN_PLAN[2]:-none selected_cores=1}"
+
+export TASKSET_CPU_LIST
+export RUN_CORE_COUNT
+export PINNING_DESC
+
+if [[ -n "$TASKSET_CPU_LIST" ]]; then
+  echo "INFO: CPU pinning enabled: $PINNING_DESC"
+  exec taskset -c "$TASKSET_CPU_LIST" uv run python "$PY_RUNNER" run "$@"
+fi
+
+echo "INFO: CPU pinning disabled: $PINNING_DESC"
+exec uv run python "$PY_RUNNER" run "$@"

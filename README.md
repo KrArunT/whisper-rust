@@ -20,7 +20,7 @@ the baseline transcription step is skipped and reused.
 
 - `discover_optimal_model.sh`: main entrypoint
 - `src/main.rs`: Rust benchmark CLI
-- `scripts/discover_optimal_model/`: modular shell + Python helper modules
+- `scripts/discover_optimal_model/discover_optimal_model.py`: Python-first benchmark orchestrator
 - `scripts/discover_optimal_model/discover_optimal_model_metrics.py`: baseline/metrics utility
 - `models/`: optimized ONNX model variants (input set under test)
 - `audio/`: input audio corpus
@@ -77,9 +77,6 @@ RUST_CHUNK_PARALLELISM=1 ./discover_optimal_model.sh
 
 # Print heartbeat while each model benchmark is running (seconds)
 MODEL_PROGRESS_INTERVAL_SEC=30 ./discover_optimal_model.sh
-
-# Bound WER/CER metrics runtime per model (seconds, 0 disables timeout)
-METRICS_TIMEOUT_SEC=600 ./discover_optimal_model.sh
 
 # Print pinning topology diagnostics (useful on SMT/EPYC systems)
 PIN_MODE=cpu_set CPU_SET=0-7 PIN_DEBUG=1 ./discover_optimal_model.sh
