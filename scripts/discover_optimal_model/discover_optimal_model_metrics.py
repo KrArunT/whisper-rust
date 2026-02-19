@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
+import concurrent.futures
 import csv
+import os
 import re
 import sys
 from pathlib import Path
@@ -46,7 +48,7 @@ def baseline_transcribe(audio_dir: str, out_dir: str, model_name: str, language:
             verbose=False,
         )
         text = (res.get("text") or "").strip()
-        safe_name = re.sub(r"[^A-Za-z0-9._-]+", "_", f.name)
+        safe_name = safe_audio_file_name(f.name)
         (outp / f"{safe_name}.txt").write_text(text + "\n", encoding="utf-8")
         all_text_parts.append(text)
 
@@ -65,6 +67,37 @@ def normalize_for_chars(s: str) -> str:
     s = re.sub(r"[^a-z0-9\s']+", " ", s)
     s = re.sub(r"\s+", "", s)
     return s
+
+
+def safe_audio_file_name(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", name)
+
+
+def parse_metrics_workers(num_pairs: int) -> int:
+    raw = os.getenv("METRICS_WORKERS", "").strip()
+    workers = 0
+    if raw:
+        try:
+            workers = int(raw)
+        except ValueError:
+            workers = 0
+    if workers <= 0:
+        run_core_count = os.getenv("RUN_CORE_COUNT", "").strip()
+        if run_core_count:
+            try:
+                workers = int(run_core_count)
+            except ValueError:
+                workers = 0
+    if workers <= 0:
+        try:
+            workers = len(os.sched_getaffinity(0))
+        except Exception:
+            workers = os.cpu_count() or 1
+    if workers < 1:
+        workers = 1
+    if num_pairs > 0:
+        workers = min(workers, num_pairs)
+    return workers
 
 
 def levenshtein(a, b) -> int:
@@ -106,6 +139,71 @@ def wer_cer(ref_text: str, hyp_text: str):
     return wer, cer
 
 
+def per_pair_edit_stats(ref_text: str, hyp_text: str):
+    ref_w = normalize_for_words(ref_text).split()
+    hyp_w = normalize_for_words(hyp_text).split()
+    ref_c = list(normalize_for_chars(ref_text))
+    hyp_c = list(normalize_for_chars(hyp_text))
+    word_edits = levenshtein(ref_w, hyp_w)
+    char_edits = levenshtein(ref_c, hyp_c)
+    return word_edits, len(ref_w), len(hyp_w), char_edits, len(ref_c), len(hyp_c)
+
+
+def per_pair_edit_stats_worker(pair):
+    ref_text, hyp_text = pair
+    return per_pair_edit_stats(ref_text, hyp_text)
+
+
+def aggregate_edit_stats(stats_rows):
+    total_word_edits = 0
+    total_ref_words = 0
+    total_hyp_words = 0
+    total_char_edits = 0
+    total_ref_chars = 0
+    total_hyp_chars = 0
+
+    for word_edits, ref_words, hyp_words, char_edits, ref_chars, hyp_chars in stats_rows:
+        total_word_edits += word_edits
+        total_ref_words += ref_words
+        total_hyp_words += hyp_words
+        total_char_edits += char_edits
+        total_ref_chars += ref_chars
+        total_hyp_chars += hyp_chars
+
+    if total_ref_words == 0:
+        wer = 0.0 if total_hyp_words == 0 else 1.0
+    else:
+        wer = total_word_edits / float(total_ref_words)
+
+    if total_ref_chars == 0:
+        cer = 0.0 if total_hyp_chars == 0 else 1.0
+    else:
+        cer = total_char_edits / float(total_ref_chars)
+
+    return wer, cer
+
+
+def wer_cer_parallel(pairs):
+    if not pairs:
+        return 0.0, 0.0
+    workers = parse_metrics_workers(len(pairs))
+    if workers <= 1:
+        stats_rows = [per_pair_edit_stats_worker(pair) for pair in pairs]
+        return aggregate_edit_stats(stats_rows)
+
+    chunksize = max(1, len(pairs) // (workers * 4))
+    try:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+            stats_rows = list(executor.map(per_pair_edit_stats_worker, pairs, chunksize=chunksize))
+    except (PermissionError, OSError):
+        print(
+            "WARNING: metrics process pool unavailable; falling back to serial WER/CER.",
+            file=sys.stderr,
+        )
+        stats_rows = [per_pair_edit_stats_worker(pair) for pair in pairs]
+    return aggregate_edit_stats(stats_rows)
+
+
 def extract_text(raw: str) -> str:
     lines = raw.splitlines()
     kept = []
@@ -124,7 +222,15 @@ def extract_text(raw: str) -> str:
     return "\n".join(kept).strip()
 
 
-def extract_text_from_csv(csv_path: str) -> str:
+def find_text_column(fieldnames):
+    candidates = ["transcription", "trascription", "text"]
+    for candidate in candidates:
+        if candidate in fieldnames:
+            return candidate
+    return None
+
+
+def extract_rows_from_csv(csv_path: str):
     p = Path(csv_path)
     if not p.exists():
         raise SystemExit(f"CSV not found: {csv_path}")
@@ -135,26 +241,69 @@ def extract_text_from_csv(csv_path: str) -> str:
         if not fieldnames:
             raise SystemExit(f"CSV has no header: {csv_path}")
 
-        candidates = ["transcription", "trascription", "text"]
-        text_col = None
-        for c in candidates:
-            if c in fieldnames:
-                text_col = c
-                break
+        text_col = find_text_column(fieldnames)
         if text_col is None:
             raise SystemExit(
                 f"No transcription column found in {csv_path}. "
-                f"Expected one of: {', '.join(candidates)}. "
+                "Expected one of: transcription, trascription, text. "
                 f"Found: {', '.join(fieldnames)}"
             )
 
         rows = list(reader)
         rows.sort(key=lambda r: (r.get("file") or "").lower())
-        parts = []
+        out = []
         for row in rows:
-            t = (row.get(text_col) or "").strip()
-            parts.append(t)
-        return "\n".join(parts).strip()
+            file_value = (row.get("file") or "").strip()
+            if file_value:
+                key = safe_audio_file_name(Path(file_value).name)
+            else:
+                key = ""
+            text_value = (row.get(text_col) or "").strip()
+            out.append((key, text_value))
+        return out
+
+
+def load_baseline_text_map(ref_path: str):
+    ref_file = Path(ref_path)
+    baseline_dir = ref_file.parent
+    if not baseline_dir.exists():
+        return {}
+
+    out = {}
+    for txt in sorted(baseline_dir.glob("*.txt"), key=lambda p: p.name.lower()):
+        if txt.name == "baseline_all.txt":
+            continue
+        key = txt.stem
+        if key in out:
+            return {}
+        out[key] = txt.read_text(encoding="utf-8", errors="ignore").strip()
+    return out
+
+
+def extract_text_from_csv(csv_path: str) -> str:
+    rows = extract_rows_from_csv(csv_path)
+    return "\n".join(text for _key, text in rows).strip()
+
+
+def compute_metrics_csv_parallel_or_fallback(ref_path: str, hyp_csv_path: str, hyp_text: str):
+    baseline_map = load_baseline_text_map(ref_path)
+    csv_rows = extract_rows_from_csv(hyp_csv_path)
+    if not csv_rows:
+        ref = Path(ref_path).read_text(encoding="utf-8", errors="ignore")
+        return wer_cer(ref, hyp_text)
+
+    if not baseline_map:
+        ref = Path(ref_path).read_text(encoding="utf-8", errors="ignore")
+        return wer_cer(ref, hyp_text)
+
+    pairs = []
+    for key, hyp in csv_rows:
+        if not key or key not in baseline_map:
+            ref = Path(ref_path).read_text(encoding="utf-8", errors="ignore")
+            return wer_cer(ref, hyp_text)
+        pairs.append((baseline_map[key], hyp))
+
+    return wer_cer_parallel(pairs)
 
 
 def average_end_to_end_latency(csv_path: str) -> float:
@@ -197,10 +346,9 @@ def main():
         return
     if cmd == "metrics_csv":
         ref_path, hyp_csv_path, hyp_clean_out = sys.argv[2], sys.argv[3], sys.argv[4]
-        ref = Path(ref_path).read_text(encoding="utf-8", errors="ignore")
         hyp = extract_text_from_csv(hyp_csv_path)
         Path(hyp_clean_out).write_text(hyp + "\n", encoding="utf-8")
-        wer, cer = wer_cer(ref, hyp)
+        wer, cer = compute_metrics_csv_parallel_or_fallback(ref_path, hyp_csv_path, hyp)
         print(f"{wer:.6f},{cer:.6f}")
         return
     if cmd == "avg_latency_csv":

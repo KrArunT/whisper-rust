@@ -78,6 +78,9 @@ RUST_CHUNK_PARALLELISM=1 ./discover_optimal_model.sh
 # Print heartbeat while each model benchmark is running (seconds)
 MODEL_PROGRESS_INTERVAL_SEC=30 ./discover_optimal_model.sh
 
+# Set WER/CER worker count (default: RUN_CORE_COUNT / pinned cores)
+METRICS_WORKERS=8 ./discover_optimal_model.sh
+
 # Print pinning topology diagnostics (useful on SMT/EPYC systems)
 PIN_MODE=cpu_set CPU_SET=0-7 PIN_DEBUG=1 ./discover_optimal_model.sh
 

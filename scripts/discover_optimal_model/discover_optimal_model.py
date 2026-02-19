@@ -1010,6 +1010,10 @@ def run_benchmark() -> int:
     else:
         print(f"INFO: CPU pinning context: {pinning.pinning_desc}")
 
+    os.environ["RUN_CORE_COUNT"] = str(pinning.run_core_count)
+    os.environ.setdefault("TASKSET_CPU_LIST", pinning.taskset_cpu_list)
+    os.environ.setdefault("PINNING_DESC", pinning.pinning_desc)
+
     runtime = initialize_runtime_paths(cfg)
     metrics_script = Path(__file__).with_name("discover_optimal_model_metrics.py")
     if not metrics_script.is_file():

@@ -45,3 +45,8 @@ Supported pinning controls:
 - `PIN_DEBUG=1` to print selected topology details
 
 Additional benchmark controls remain unchanged (`MODELS_ROOT`, `AUDIO_DIR`, `RESULTS_ROOT`, `NUM_BEAMS`, `RUST_CHUNK_PARALLELISM`, etc.).
+
+WER/CER parallelism controls:
+
+- `METRICS_WORKERS=<n>` to force worker count
+- default worker count uses `RUN_CORE_COUNT` (derived from selected pinned CPUs)
