@@ -7,7 +7,7 @@ ARG UV_VERSION=0.7.2
 
 ENV DEBIAN_FRONTEND=noninteractive \
     UV_LINK_MODE=copy \
-    UV_COMPILE_BYTECODE=1 \
+    UV_COMPILE_BYTECODE=0 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     CARGO_TERM_COLOR=always
 
@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ffmpeg \
     git \
+    time \
     pkg-config \
     build-essential \
     clang \

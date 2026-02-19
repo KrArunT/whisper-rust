@@ -11,4 +11,4 @@ if [[ ! -f "$PY_RUNNER" ]]; then
   exit 1
 fi
 
-exec uv run python "$PY_RUNNER" run "$@"
+exec python "$PY_RUNNER" run "$@"
