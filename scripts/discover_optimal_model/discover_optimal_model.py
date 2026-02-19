@@ -32,6 +32,9 @@ class Config:
     model_progress_interval_sec: int
     baseline_model: str
     baseline_lang: str
+    python_bin: str
+    rust_bench_bin: str
+    tokenizer_json: Path | None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,6 +106,13 @@ def load_config() -> Config:
     audio_dir = Path(os.getenv("AUDIO_DIR", "audio"))
     results_root = Path(os.getenv("RESULTS_ROOT", "results/benchmarks/without_hf_pipeline_rust"))
 
+    tokenizer_env = os.getenv("TOKENIZER_JSON", "").strip()
+    if tokenizer_env:
+        tokenizer_json: Path | None = Path(tokenizer_env)
+    else:
+        default_tokenizer = Path("tokenizer.json")
+        tokenizer_json = default_tokenizer if default_tokenizer.is_file() else None
+
     cfg = Config(
         models_root=models_root,
         audio_dir=audio_dir,
@@ -113,12 +123,16 @@ def load_config() -> Config:
         model_progress_interval_sec=parse_int_env("MODEL_PROGRESS_INTERVAL_SEC", 30),
         baseline_model=os.getenv("BASELINE_MODEL", "base"),
         baseline_lang=os.getenv("BASELINE_LANG", "en"),
+        python_bin=os.getenv("BENCHMARK_PYTHON_BIN", sys.executable),
+        rust_bench_bin=os.getenv("RUST_BENCH_BIN", "whisper_ort_bench"),
+        tokenizer_json=tokenizer_json,
     )
     return cfg
 
 
 def require_command(cmd: str) -> None:
-    if shutil.which(cmd) is None:
+    resolved = shutil.which(cmd)
+    if resolved is None and not (Path(cmd).is_file() and os.access(cmd, os.X_OK)):
         raise BenchmarkError(f"Required command not found: {cmd}")
 
 
@@ -131,10 +145,12 @@ def validate_benchmark_inputs(cfg: Config) -> None:
     if not model_dirs:
         raise BenchmarkError(f"No model directories found in: {cfg.models_root}")
 
-    require_command("uv")
-    require_command("cargo")
+    require_command(cfg.python_bin)
+    require_command(cfg.rust_bench_bin)
     if not Path("/usr/bin/time").is_file():
         raise BenchmarkError("Required executable missing: /usr/bin/time")
+    if cfg.tokenizer_json is not None and not cfg.tokenizer_json.is_file():
+        raise BenchmarkError(f"TOKENIZER_JSON does not exist: {cfg.tokenizer_json}")
 
 
 def backup_old_results(runtime: RuntimePaths) -> None:
@@ -325,7 +341,20 @@ def run_timed_command(
             return_code = process.wait()
 
         if return_code != 0:
-            raise subprocess.CalledProcessError(return_code, full_cmd)
+            details = ""
+            if stderr_log is not None and stderr_log.is_file():
+                stderr_tail = stderr_log.read_text(encoding="utf-8", errors="ignore").splitlines()[-80:]
+                if stderr_tail:
+                    details = "\n".join(stderr_tail)
+            if details:
+                raise BenchmarkError(
+                    f"{run_label} failed with exit code {return_code}. "
+                    f"Command: {' '.join(full_cmd)}\nLast stderr lines:\n{details}"
+                )
+            raise BenchmarkError(
+                f"{run_label} failed with exit code {return_code}. "
+                f"Command: {' '.join(full_cmd)}"
+            )
     finally:
         if stderr_handle is not None:
             stderr_handle.close()
@@ -362,9 +391,7 @@ def generate_baseline_transcripts(
         )
         run_timed_command(
             [
-                "uv",
-                "run",
-                "python",
+                cfg.python_bin,
                 str(metrics_script),
                 "baseline",
                 str(cfg.audio_dir),
@@ -415,15 +442,14 @@ def generate_baseline_transcripts(
 
 
 def compute_metrics_csv(
+    cfg: Config,
     metrics_script: Path,
     ref_path: Path,
     hyp_csv_path: Path,
     hyp_clean_out: Path,
 ) -> tuple[str, str] | None:
     cmd = [
-        "uv",
-        "run",
-        "python",
+        cfg.python_bin,
         str(metrics_script),
         "metrics_csv",
         str(ref_path),
@@ -494,39 +520,40 @@ def run_model_benchmark(
         cpu_context.run_core_count, cfg.rust_chunk_parallelism
     )
 
+    rust_cmd: list[str] = [
+        cfg.rust_bench_bin,
+        "--audio-dir",
+        str(cfg.audio_dir),
+        "--onnx-dir",
+        str(onnx_dir),
+        "--language",
+        cfg.benchmark_lang,
+        "--task",
+        "transcribe",
+        "--max-new-tokens",
+        "128",
+        "--num-beams",
+        str(cfg.num_beams),
+        "--intra-op",
+        str(model_intra_op),
+        "--inter-op",
+        "1",
+        "--chunk-parallelism",
+        str(model_chunk_parallelism),
+        "--warmup",
+        "1",
+        "--out-csv",
+        str(model_csv),
+        "--out-json",
+        str(model_json),
+        "--out-summary-json",
+        str(model_summary),
+    ]
+    if cfg.tokenizer_json is not None:
+        rust_cmd.extend(["--tokenizer-json", str(cfg.tokenizer_json)])
+
     run_timed_command(
-        [
-            "cargo",
-            "run",
-            "--release",
-            "--",
-            "--audio-dir",
-            str(cfg.audio_dir),
-            "--onnx-dir",
-            str(onnx_dir),
-            "--language",
-            cfg.benchmark_lang,
-            "--task",
-            "transcribe",
-            "--max-new-tokens",
-            "128",
-            "--num-beams",
-            str(cfg.num_beams),
-            "--intra-op",
-            str(model_intra_op),
-            "--inter-op",
-            "1",
-            "--chunk-parallelism",
-            str(model_chunk_parallelism),
-            "--warmup",
-            "1",
-            "--out-csv",
-            str(model_csv),
-            "--out-json",
-            str(model_json),
-            "--out-summary-json",
-            str(model_summary),
-        ],
+        rust_cmd,
         time_log,
         stderr_log=run_err,
         quiet_stdout=True,
@@ -549,6 +576,7 @@ def run_model_benchmark(
 
     print(f"INFO: Computing WER/CER for {model_name}...")
     metrics = compute_metrics_csv(
+        cfg=cfg,
         metrics_script=metrics_script,
         ref_path=runtime.baseline_all_txt,
         hyp_csv_path=model_csv,
@@ -734,8 +762,16 @@ def run_benchmark() -> int:
         baseline = generate_baseline_transcripts(cfg, runtime, metrics_script)
 
         rows: list[dict[str, str]] = []
+        failed_models: list[str] = []
         for onnx_dir in model_directories(cfg.models_root):
-            rows.append(run_model_benchmark(cfg, runtime, cpu_context, metrics_script, onnx_dir))
+            try:
+                rows.append(run_model_benchmark(cfg, runtime, cpu_context, metrics_script, onnx_dir))
+            except BenchmarkError as exc:
+                failed_models.append(onnx_dir.name)
+                print(f"ERROR: Model {onnx_dir.name} failed: {exc}")
+
+        if not rows:
+            raise BenchmarkError("All model benchmarks failed; no results were produced.")
 
         best = select_best_models(rows)
         write_markdown_report(
@@ -755,6 +791,8 @@ def run_benchmark() -> int:
             "INFO: CPU affinity: "
             f"selected_cores={cpu_context.run_core_count} cpus={cpu_context.cpu_list_desc}"
         )
+        if failed_models:
+            print(f"WARNING: Failed models skipped: {', '.join(failed_models)}")
         return 0
     finally:
         cleanup_runtime_paths(runtime)

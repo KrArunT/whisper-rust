@@ -21,6 +21,7 @@ the baseline transcription step is skipped and reused.
 - `discover_optimal_model.sh`: main entrypoint
 - `Dockerfile`: reproducible benchmark environment (Rust + Python + uv + ffmpeg)
 - `docker_run_benchmark.sh`: helper to build and run with Docker cpuset pinning
+- `tokenizer.json`: Whisper tokenizer used for text decoding during Rust transcription
 - `src/main.rs`: Rust benchmark CLI
 - `scripts/discover_optimal_model/discover_optimal_model.py`: Python-first benchmark orchestrator
 - `scripts/discover_optimal_model/discover_optimal_model_metrics.py`: baseline/metrics utility
@@ -70,6 +71,9 @@ METRICS_WORKERS=8 ./discover_optimal_model.sh
 
 # Change Rust decode language (default: en)
 BENCHMARK_LANG=en ./discover_optimal_model.sh
+
+# Override tokenizer path (default: ./tokenizer.json when present)
+TOKENIZER_JSON=tokenizer.json ./discover_optimal_model.sh
 ```
 
 ## Docker Reproducible Run (Recommended)

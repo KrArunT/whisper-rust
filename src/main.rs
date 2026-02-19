@@ -590,6 +590,7 @@ fn resolve_tokenizer(args: &Args) -> Result<Option<(Tokenizer, PathBuf)>> {
     let candidates = [
         PathBuf::from(&args.onnx_dir).join("tokenizer.json"),
         PathBuf::from(&args.model_id).join("tokenizer.json"),
+        PathBuf::from("tokenizer.json"),
     ];
     for p in candidates.iter() {
         if p.is_file() {
