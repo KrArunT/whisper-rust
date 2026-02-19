@@ -3,7 +3,7 @@
 Standalone repository to benchmark optimized Whisper ONNX Runtime models on CPU using:
 - Rust inference pipeline (`src/main.rs`)
 - Python Whisper baseline for WER/CER reference
-- Strict CPU pinning controls for reproducible latency measurements
+- Docker cpuset pinning for reproducible latency measurements
 
 ## Overview
 
@@ -19,6 +19,8 @@ the baseline transcription step is skipped and reused.
 ## Repository Layout
 
 - `discover_optimal_model.sh`: main entrypoint
+- `Dockerfile`: reproducible benchmark environment (Rust + Python + uv + ffmpeg)
+- `docker_run_benchmark.sh`: helper to build and run with Docker cpuset pinning
 - `src/main.rs`: Rust benchmark CLI
 - `scripts/discover_optimal_model/discover_optimal_model.py`: Python-first benchmark orchestrator
 - `scripts/discover_optimal_model/discover_optimal_model_metrics.py`: baseline/metrics utility
@@ -34,7 +36,7 @@ the baseline transcription step is skipped and reused.
 - Rust toolchain (`cargo`, `rustc`)
 - `uv`
 - `/usr/bin/time`
-- `taskset` (required for pinning modes other than `PIN_MODE=none`)
+- Docker (for containerized reproducible runs)
 
 ### Python (uv-managed)
 
@@ -54,42 +56,44 @@ cargo build --release
 ./discover_optimal_model.sh
 ```
 
-## Common Configuration
+## Common Configuration (Host)
 
 ```bash
-# Check CPUs available to this shell
-taskset -pc $$
-
-# Pin first N allowed CPUs
-PIN_MODE=num_cpus NUM_CPUS=8 ./discover_optimal_model.sh
-
-# Pin explicit CPU set
-PIN_MODE=cpu_set CPU_SET=0-7 ./discover_optimal_model.sh
-
-# Pin explicit core list (order preserved)
-PIN_MODE=core_list CORE_LIST=0,2,4,6 ./discover_optimal_model.sh
-
-# Disable pinning
-PIN_MODE=none ./discover_optimal_model.sh
-
 # Bound chunk-level parallelism (default: 1)
 RUST_CHUNK_PARALLELISM=1 ./discover_optimal_model.sh
 
 # Print heartbeat while each model benchmark is running (seconds)
 MODEL_PROGRESS_INTERVAL_SEC=30 ./discover_optimal_model.sh
 
-# Set WER/CER worker count (default: RUN_CORE_COUNT / pinned cores)
+# Set WER/CER worker count (default: container/host CPU affinity core count)
 METRICS_WORKERS=8 ./discover_optimal_model.sh
-
-# Print pinning topology diagnostics (useful on SMT/EPYC systems)
-PIN_MODE=cpu_set CPU_SET=0-7 PIN_DEBUG=1 ./discover_optimal_model.sh
-
-# Fail if selection includes SMT siblings from the same physical core
-PIN_MODE=cpu_set CPU_SET=0-7 PIN_STRICT_PHYSICAL_CORES=1 ./discover_optimal_model.sh
 
 # Change Rust decode language (default: en)
 BENCHMARK_LANG=en ./discover_optimal_model.sh
 ```
+
+## Docker Reproducible Run (Recommended)
+
+Build image with host user mapping (normal non-root user inside container):
+
+```bash
+docker build \
+  --build-arg UID="$(id -u)" \
+  --build-arg GID="$(id -g)" \
+  -t whisper-rust-bench:latest .
+```
+
+Run with Docker CPU pinning (`--cpuset-cpus`):
+
+```bash
+docker run --rm -it \
+  --cpuset-cpus="0-7" \
+  -v "$PWD:/workspace" \
+  -w /workspace \
+  whisper-rust-bench:latest
+```
+
+The benchmark runner reads container CPU affinity and sets thread planning from that scope.
 
 ## Metrics Semantics
 
@@ -119,9 +123,9 @@ Backups of prior runs:
 ## Reproducibility Notes
 
 - Rust file discovery is recursive under `AUDIO_DIR`.
-- Pinning mode is strict: invalid CPU selections fail fast.
+- CPU selection is controlled only by container affinity (for example `docker run --cpuset-cpus=...`).
 - Threading is bounded to avoid oversubscription by default:
-  `intra-op * chunk-parallelism <= selected cores`.
+  `intra-op * chunk-parallelism <= container-visible cores`.
 
 ## Push to a New Remote Repository
 

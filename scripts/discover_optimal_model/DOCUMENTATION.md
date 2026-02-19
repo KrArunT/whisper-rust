@@ -1,52 +1,43 @@
-# Discover Optimal Model (Python-First Workflow)
+# Discover Optimal Model (Container-Affinity Workflow)
 
-This benchmark flow is now Python-first, with exactly one top-level shell entrypoint for CPU pinning orchestration.
+This benchmark flow is Python-first with one shell entrypoint. Host `taskset` pinning is removed.
 
 ## File Inventory
 
 | File | Purpose |
 |---|---|
-| `discover_optimal_model.sh` | Canonical and only shell entrypoint. Resolves pinning plan, applies `taskset`, and launches Python workflow. |
-| `scripts/discover_optimal_model/discover_optimal_model.py` | Main orchestrator: config loading, pinning resolution, baseline/model execution, aggregation, and report generation. |
-| `scripts/discover_optimal_model/discover_optimal_model_metrics.py` | Python helper for baseline transcript generation, CSV text extraction, and WER/CER + latency utilities. |
+| `discover_optimal_model.sh` | Canonical shell entrypoint; launches Python workflow directly. |
+| `scripts/discover_optimal_model/discover_optimal_model.py` | Main orchestrator: config, CPU affinity detection, baseline/model execution, aggregation, report generation. |
+| `scripts/discover_optimal_model/discover_optimal_model_metrics.py` | Python helper for baseline generation, CSV extraction, WER/CER, and latency utilities. |
 
 ## Execution Flow
 
 1. `discover_optimal_model.sh`
-2. `discover_optimal_model.py pinning-plan` (returns CPU list + run core count + description)
-3. `taskset -c <resolved CPUs> uv run python ... discover_optimal_model.py run` (if pinning enabled)
-4. `discover_optimal_model.py run`
+2. `discover_optimal_model.py run`
    - Validate paths and dependencies
+   - Detect process CPU affinity (`os.sched_getaffinity`) and derive `RUN_CORE_COUNT`
    - Backup old results
    - Generate/reuse baseline transcripts
-   - Benchmark each model directory with Rust binary
+   - Benchmark model directories with Rust binary
    - Compute WER/CER for each model
    - Write merged CSV and markdown report
 
-## CPU Pinning Notes
+## CPU Pinning Model
 
-- Pinning is decided once in `discover_optimal_model.py pinning-plan`.
-- The shell wrapper applies `taskset` to the long-running Python process.
-- All child processes inherit affinity automatically, including:
-  - Rust model inference (`cargo run --release -- ...`)
-  - Baseline transcription helper calls
-  - WER/CER helper calls
-- This eliminates unpinned moving parts in metric stages on multi-socket/high-core hosts (for example AMD EPYC Turin).
+- CPU pinning is done by the container runtime, not by the benchmark scripts.
+- Use Docker cpuset controls (example: `docker run --cpuset-cpus=0-7 ...`).
+- The Python workflow reads visible CPUs from affinity and uses that to bound threading.
+- WER/CER worker default also follows this affinity-derived `RUN_CORE_COUNT`.
 
 ## Environment Controls
 
-Supported pinning controls:
+- `MODELS_ROOT`, `AUDIO_DIR`, `RESULTS_ROOT`
+- `NUM_BEAMS`, `BENCHMARK_LANG`
+- `RUST_CHUNK_PARALLELISM`
+- `MODEL_PROGRESS_INTERVAL_SEC`
+- `BASELINE_MODEL`, `BASELINE_LANG`
 
-- `PIN_MODE=num_cpus|cpu_set|core_list|none`
-- `NUM_CPUS=<n>` (for `PIN_MODE=num_cpus`)
-- `CPU_SET=0-7,16-23` (for `PIN_MODE=cpu_set`)
-- `CORE_LIST=0,2,4,6` (for `PIN_MODE=core_list`)
-- `PIN_STRICT_PHYSICAL_CORES=1` to fail when SMT siblings are selected
-- `PIN_DEBUG=1` to print selected topology details
-
-Additional benchmark controls remain unchanged (`MODELS_ROOT`, `AUDIO_DIR`, `RESULTS_ROOT`, `NUM_BEAMS`, `RUST_CHUNK_PARALLELISM`, etc.).
-
-WER/CER parallelism controls:
+WER/CER parallelism:
 
 - `METRICS_WORKERS=<n>` to force worker count
-- default worker count uses `RUN_CORE_COUNT` (derived from selected pinned CPUs)
+- default uses affinity-derived `RUN_CORE_COUNT`

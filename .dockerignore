@@ -1,0 +1,10 @@
+.git
+.gitignore
+.gitattributes
+.venv
+target
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+results/benchmarks

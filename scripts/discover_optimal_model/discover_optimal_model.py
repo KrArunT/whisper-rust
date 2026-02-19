@@ -21,34 +21,23 @@ class BenchmarkError(RuntimeError):
     pass
 
 
-class PinningError(RuntimeError):
-    pass
-
-
 @dataclasses.dataclass(frozen=True)
 class Config:
     models_root: Path
     audio_dir: Path
     results_root: Path
-    pin_mode: str
-    num_cpus_raw: str
-    cpu_set: str
-    core_list: str
     num_beams: int
     benchmark_lang: str
     rust_chunk_parallelism: int
     model_progress_interval_sec: int
-    pin_debug: bool
-    pin_strict_physical_cores: bool
     baseline_model: str
     baseline_lang: str
 
 
 @dataclasses.dataclass(frozen=True)
-class PinningPlan:
-    taskset_cpu_list: str
+class CpuAffinityContext:
     run_core_count: int
-    pinning_desc: str
+    cpu_list_desc: str
 
 
 @dataclasses.dataclass(frozen=True)
@@ -109,47 +98,19 @@ def parse_int_env(name: str, default: int) -> int:
         raise BenchmarkError(f"{name} must be an integer (got '{raw}')") from exc
 
 
-def parse_flag_env(name: str, default: str) -> bool:
-    raw = os.getenv(name, default).strip()
-    return raw == "1"
-
-
-def resolve_pin_mode(cpu_set: str, core_list: str) -> str:
-    pin_mode_input = os.getenv("PIN_MODE", "").strip()
-    if pin_mode_input:
-        return re.sub(r"\s+", "", pin_mode_input.lower())
-
-    if os.getenv("ENABLE_TASKSET_PINNING", "1") != "1":
-        return "none"
-    if cpu_set.strip():
-        return "cpu_set"
-    if core_list.strip():
-        return "core_list"
-    return "num_cpus"
-
-
 def load_config() -> Config:
     models_root = Path(os.getenv("MODELS_ROOT", "models/whisper-base-optimized"))
     audio_dir = Path(os.getenv("AUDIO_DIR", "audio"))
     results_root = Path(os.getenv("RESULTS_ROOT", "results/benchmarks/without_hf_pipeline_rust"))
 
-    cpu_set = os.getenv("CPU_SET", os.getenv("CPUSET_LIST", os.getenv("PIN_CPUS", "")))
-    core_list = os.getenv("CORE_LIST", "")
-
     cfg = Config(
         models_root=models_root,
         audio_dir=audio_dir,
         results_root=results_root,
-        pin_mode=resolve_pin_mode(cpu_set, core_list),
-        num_cpus_raw=os.getenv("NUM_CPUS", os.getenv("MAX_CORES_PER_RUN", "8")),
-        cpu_set=cpu_set,
-        core_list=core_list,
         num_beams=parse_int_env("NUM_BEAMS", 1),
         benchmark_lang=os.getenv("BENCHMARK_LANG", "en"),
         rust_chunk_parallelism=parse_int_env("RUST_CHUNK_PARALLELISM", 1),
         model_progress_interval_sec=parse_int_env("MODEL_PROGRESS_INTERVAL_SEC", 30),
-        pin_debug=parse_flag_env("PIN_DEBUG", "0"),
-        pin_strict_physical_cores=parse_flag_env("PIN_STRICT_PHYSICAL_CORES", "0"),
         baseline_model=os.getenv("BASELINE_MODEL", "base"),
         baseline_lang=os.getenv("BASELINE_LANG", "en"),
     )
@@ -224,242 +185,19 @@ def cleanup_runtime_paths(runtime: RuntimePaths) -> None:
     shutil.rmtree(runtime.tmp_dir, ignore_errors=True)
 
 
-def parse_cpu_set_strict(spec: str) -> list[int]:
-    cleaned = re.sub(r"\s+", "", spec)
-    if not cleaned:
-        raise PinningError("CPU_SET cannot be empty in PIN_MODE=cpu_set.")
-
-    cpus: set[int] = set()
-    for token in cleaned.split(","):
-        if not token:
-            continue
-        if re.fullmatch(r"\d+", token):
-            cpus.add(int(token))
-            continue
-        match = re.fullmatch(r"(\d+)-(\d+)", token)
-        if match:
-            start = int(match.group(1))
-            end = int(match.group(2))
-            if start > end:
-                raise PinningError(
-                    f"Invalid CPU range '{token}' in CPU_SET (descending ranges are not allowed)."
-                )
-            for value in range(start, end + 1):
-                cpus.add(value)
-            continue
-        raise PinningError(
-            f"Invalid token '{token}' in CPU_SET. Use comma-separated ints/ranges, e.g. 0-7,16-23."
-        )
-
-    return sorted(cpus)
-
-
-def parse_core_list_strict(spec: str) -> list[int]:
-    cleaned = re.sub(r"\s+", "", spec)
-    if not cleaned:
-        raise PinningError("CORE_LIST cannot be empty in PIN_MODE=core_list.")
-
-    selected: list[int] = []
-    seen: set[int] = set()
-    for token in cleaned.split(","):
-        if not token:
-            continue
-        if not re.fullmatch(r"\d+", token):
-            raise PinningError(
-                f"Invalid token '{token}' in CORE_LIST. Use explicit core ids only, e.g. 0,2,4,6."
-            )
-        value = int(token)
-        if value in seen:
-            continue
-        selected.append(value)
-        seen.add(value)
-    return selected
-
-
-def get_online_cpus() -> list[int]:
-    online_path = Path("/sys/devices/system/cpu/online")
-    if online_path.is_file():
-        return parse_cpu_set_strict(online_path.read_text(encoding="utf-8").strip())
-    return list(range(os.cpu_count() or 1))
-
-
-def get_allowed_cpus() -> list[int]:
+def detect_cpu_affinity_context() -> CpuAffinityContext:
+    cpus: list[int]
     try:
-        allowed = sorted(os.sched_getaffinity(0))
-        if allowed:
-            return allowed
-    except AttributeError:
-        pass
-    return get_online_cpus()
-
-
-def cpu_topology_triplet(cpu: int) -> tuple[str, str, str]:
-    pkg = "NA"
-    core = "NA"
-    node = "NA"
-    cpu_root = Path(f"/sys/devices/system/cpu/cpu{cpu}")
-
-    pkg_file = cpu_root / "topology/physical_package_id"
-    core_file = cpu_root / "topology/core_id"
-    if pkg_file.is_file():
-        pkg = pkg_file.read_text(encoding="utf-8").strip()
-    if core_file.is_file():
-        core = core_file.read_text(encoding="utf-8").strip()
-
-    node_dirs = sorted(cpu_root.glob("node*"))
-    if node_dirs:
-        node = node_dirs[0].name.replace("node", "")
-
-    return pkg, core, node
-
-
-def emit_pinning_debug_info(allowed: Sequence[int], selected: Sequence[int], enabled: bool) -> None:
-    if not enabled:
-        return
-    smt_active = "NA"
-    smt_file = Path("/sys/devices/system/cpu/smt/active")
-    if smt_file.is_file():
-        smt_active = smt_file.read_text(encoding="utf-8").strip()
-
-    print(f"DEBUG: [pinning] smt_active={smt_active}", file=sys.stderr)
-    print(f"DEBUG: [pinning] allowed_cpus={','.join(str(c) for c in allowed)}", file=sys.stderr)
-    print(f"DEBUG: [pinning] selected_cpus={','.join(str(c) for c in selected)}", file=sys.stderr)
-
-    for cpu in selected:
-        pkg, core, node = cpu_topology_triplet(cpu)
-        siblings = "NA"
-        siblings_file = Path(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list")
-        if siblings_file.is_file():
-            siblings = siblings_file.read_text(encoding="utf-8").strip()
-        print(
-            f"DEBUG: [pinning] cpu={cpu} package={pkg} core={core} node={node} siblings={siblings}",
-            file=sys.stderr,
-        )
-
-
-def validate_distinct_physical_cores_or_warn(
-    selected: Sequence[int], strict: bool
-) -> None:
-    core_id_file = Path("/sys/devices/system/cpu/cpu0/topology/core_id")
-    if not core_id_file.is_file():
-        return
-
-    seen_core: dict[str, int] = {}
-    conflicts: list[str] = []
-    for cpu in selected:
-        pkg, core, _node = cpu_topology_triplet(cpu)
-        key = f"{pkg}:{core}"
-        if key in seen_core:
-            conflicts.append(f"{pkg}/core{core}=cpu{seen_core[key]},cpu{cpu}")
-        else:
-            seen_core[key] = cpu
-
-    if not conflicts:
-        return
-    message = (
-        "Selected CPUs include SMT siblings on the same physical core "
-        f"({';'.join(conflicts)})."
-    )
-    if strict:
-        raise PinningError(
-            f"{message} Choose one thread per core or set PIN_STRICT_PHYSICAL_CORES=0."
-        )
-    print(f"WARNING: [pinning] {message}", file=sys.stderr)
-
-
-def validate_mode_inputs_or_die(pin_mode: str, cpu_set: str, core_list: str) -> None:
-    cpu_set_trimmed = re.sub(r"\s+", "", cpu_set)
-    core_list_trimmed = re.sub(r"\s+", "", core_list)
-
-    if pin_mode == "num_cpus":
-        if cpu_set_trimmed:
-            raise PinningError("PIN_MODE=num_cpus cannot be used with CPU_SET.")
-        if core_list_trimmed:
-            raise PinningError("PIN_MODE=num_cpus cannot be used with CORE_LIST.")
-        return
-    if pin_mode == "cpu_set":
-        if not cpu_set_trimmed:
-            raise PinningError("PIN_MODE=cpu_set requires CPU_SET.")
-        if core_list_trimmed:
-            raise PinningError("PIN_MODE=cpu_set cannot be used with CORE_LIST.")
-        return
-    if pin_mode == "core_list":
-        if not core_list_trimmed:
-            raise PinningError("PIN_MODE=core_list requires CORE_LIST.")
-        if cpu_set_trimmed:
-            raise PinningError("PIN_MODE=core_list cannot be used with CPU_SET.")
-        return
-    if pin_mode == "none":
-        if cpu_set_trimmed:
-            raise PinningError("PIN_MODE=none cannot be used with CPU_SET.")
-        if core_list_trimmed:
-            raise PinningError("PIN_MODE=none cannot be used with CORE_LIST.")
-        return
-
-    raise PinningError(
-        f"Unsupported PIN_MODE='{pin_mode}'. Use one of: num_cpus, cpu_set, core_list, none."
-    )
-
-
-def parse_positive_int(name: str, value: str) -> int:
-    if not re.fullmatch(r"[1-9][0-9]*", value):
-        raise PinningError(f"{name} must be a positive integer (got '{value}').")
-    return int(value)
-
-
-def prepare_taskset_pinning(cfg: Config) -> PinningPlan:
-    validate_mode_inputs_or_die(cfg.pin_mode, cfg.cpu_set, cfg.core_list)
-
-    if cfg.pin_mode != "none" and shutil.which("taskset") is None:
-        raise PinningError(f"taskset is required for PIN_MODE={cfg.pin_mode}.")
-
-    allowed = get_allowed_cpus()
-    if not allowed:
-        raise PinningError("Could not detect allowed CPUs.")
-
-    if cfg.pin_mode == "none":
-        run_core_count = len(allowed)
-        desc = f"none selected_cores={run_core_count}"
-        return PinningPlan(taskset_cpu_list="", run_core_count=run_core_count, pinning_desc=desc)
-
-    if cfg.pin_mode == "num_cpus":
-        num_cpus = parse_positive_int("NUM_CPUS", cfg.num_cpus_raw.strip())
-        if num_cpus > len(allowed):
-            raise PinningError(
-                f"NUM_CPUS={num_cpus} exceeds allowed CPUs ({len(allowed)})."
-            )
-        selected = allowed[:num_cpus]
-        mode_desc = f"num_cpus(NUM_CPUS={num_cpus})"
-    elif cfg.pin_mode == "cpu_set":
-        requested = parse_cpu_set_strict(cfg.cpu_set)
-        missing = [cpu for cpu in requested if cpu not in set(allowed)]
-        if missing:
-            raise PinningError(
-                "CPU_SET contains CPUs not allowed for this process: "
-                + ",".join(str(v) for v in missing)
-            )
-        selected = requested
-        mode_desc = f"cpu_set(CPU_SET={cfg.cpu_set})"
+        cpus = sorted(os.sched_getaffinity(0))
+    except (AttributeError, OSError):
+        cpus = list(range(os.cpu_count() or 1))
+    if not cpus:
+        cpus = [0]
+    if len(cpus) > 32:
+        desc = ",".join(str(c) for c in cpus[:32]) + ",..."
     else:
-        requested = parse_core_list_strict(cfg.core_list)
-        missing = [cpu for cpu in requested if cpu not in set(allowed)]
-        if missing:
-            raise PinningError(
-                "CORE_LIST contains CPUs not allowed for this process: "
-                + ",".join(str(v) for v in missing)
-            )
-        selected = requested
-        mode_desc = f"core_list(CORE_LIST={cfg.core_list})"
-
-    if not selected:
-        raise PinningError(f"Selected CPU list is empty for PIN_MODE={cfg.pin_mode}.")
-
-    validate_distinct_physical_cores_or_warn(selected, strict=cfg.pin_strict_physical_cores)
-    emit_pinning_debug_info(allowed, selected, enabled=cfg.pin_debug)
-
-    selected_str = ",".join(str(cpu) for cpu in selected)
-    desc = f"{mode_desc} selected_cores={len(selected)} cpus={selected_str}"
-    return PinningPlan(taskset_cpu_list=selected_str, run_core_count=len(selected), pinning_desc=desc)
+        desc = ",".join(str(c) for c in cpus)
+    return CpuAffinityContext(run_core_count=len(cpus), cpu_list_desc=desc)
 
 
 def elapsed_wall_time_from_log(time_log: Path) -> float:
@@ -736,7 +474,7 @@ def model_directories(models_root: Path) -> Iterable[Path]:
 def run_model_benchmark(
     cfg: Config,
     runtime: RuntimePaths,
-    pinning: PinningPlan,
+    cpu_context: CpuAffinityContext,
     metrics_script: Path,
     onnx_dir: Path,
 ) -> dict[str, str]:
@@ -753,7 +491,7 @@ def run_model_benchmark(
     model_tmp_dir.mkdir(parents=True, exist_ok=True)
 
     model_chunk_parallelism, model_intra_op = compute_threading_plan(
-        pinning.run_core_count, cfg.rust_chunk_parallelism
+        cpu_context.run_core_count, cfg.rust_chunk_parallelism
     )
 
     run_timed_command(
@@ -878,7 +616,7 @@ def markdown_row_from_result(row: dict[str, str]) -> str:
 def write_markdown_report(
     runtime: RuntimePaths,
     baseline: BaselineMetrics,
-    pinning: PinningPlan,
+    cpu_context: CpuAffinityContext,
     rows: list[dict[str, str]],
     best: BestRows,
     baseline_model: str,
@@ -893,7 +631,9 @@ def write_markdown_report(
     report_lines.append(
         f"**Baseline (accuracy reference):** OpenAI Whisper `{baseline_model}` via python `whisper` library"
     )
-    report_lines.append(f"**CPU pinning:** `{pinning.pinning_desc}`")
+    report_lines.append(
+        f"**Container CPU affinity:** `selected_cores={cpu_context.run_core_count} cpus={cpu_context.cpu_list_desc}`"
+    )
     report_lines.append(
         "**Time column:** average end-to-end latency per audio from `inference_per_file.csv`"
     )
@@ -970,49 +710,15 @@ def write_markdown_report(
     runtime.report_md.write_text("\n".join(report_lines) + "\n", encoding="utf-8")
 
 
-def resolve_pinning_from_env(cfg: Config) -> PinningPlan | None:
-    taskset_cpu_list = os.getenv("TASKSET_CPU_LIST", "")
-    run_core_count_raw = os.getenv("RUN_CORE_COUNT", "")
-    pinning_desc = os.getenv("PINNING_DESC", "")
-
-    if not run_core_count_raw:
-        return None
-    try:
-        run_core_count = int(run_core_count_raw)
-    except ValueError:
-        raise BenchmarkError(f"Invalid RUN_CORE_COUNT: {run_core_count_raw}")
-    if run_core_count < 1:
-        raise BenchmarkError(f"Invalid RUN_CORE_COUNT: {run_core_count_raw}")
-    if not pinning_desc:
-        pinning_desc = "none selected_cores={run_core_count}".format(
-            run_core_count=run_core_count
-        )
-    if cfg.pin_mode != "none" and not taskset_cpu_list:
-        raise BenchmarkError("TASKSET_CPU_LIST is empty but pinning mode is enabled.")
-    return PinningPlan(
-        taskset_cpu_list=taskset_cpu_list,
-        run_core_count=run_core_count,
-        pinning_desc=pinning_desc,
-    )
-
-
 def run_benchmark() -> int:
     cfg = load_config()
     validate_benchmark_inputs(cfg)
-
-    pinning = resolve_pinning_from_env(cfg)
-    if pinning is None:
-        pinning = prepare_taskset_pinning(cfg)
-        if pinning.taskset_cpu_list:
-            print(f"INFO: CPU pinning enabled: {pinning.pinning_desc}")
-        else:
-            print(f"INFO: CPU pinning disabled: {pinning.pinning_desc}")
-    else:
-        print(f"INFO: CPU pinning context: {pinning.pinning_desc}")
-
-    os.environ["RUN_CORE_COUNT"] = str(pinning.run_core_count)
-    os.environ.setdefault("TASKSET_CPU_LIST", pinning.taskset_cpu_list)
-    os.environ.setdefault("PINNING_DESC", pinning.pinning_desc)
+    cpu_context = detect_cpu_affinity_context()
+    print(
+        "INFO: Container CPU affinity context: "
+        f"selected_cores={cpu_context.run_core_count} cpus={cpu_context.cpu_list_desc}"
+    )
+    os.environ["RUN_CORE_COUNT"] = str(cpu_context.run_core_count)
 
     runtime = initialize_runtime_paths(cfg)
     metrics_script = Path(__file__).with_name("discover_optimal_model_metrics.py")
@@ -1029,13 +735,13 @@ def run_benchmark() -> int:
 
         rows: list[dict[str, str]] = []
         for onnx_dir in model_directories(cfg.models_root):
-            rows.append(run_model_benchmark(cfg, runtime, pinning, metrics_script, onnx_dir))
+            rows.append(run_model_benchmark(cfg, runtime, cpu_context, metrics_script, onnx_dir))
 
         best = select_best_models(rows)
         write_markdown_report(
             runtime=runtime,
             baseline=baseline,
-            pinning=pinning,
+            cpu_context=cpu_context,
             rows=rows,
             best=best,
             baseline_model=cfg.baseline_model,
@@ -1045,26 +751,19 @@ def run_benchmark() -> int:
         print(f"INFO: CSV   : {runtime.merged_model_csv}")
         print(f"INFO: Report: {runtime.report_md}")
         print(f"INFO: Baseline transcripts: {runtime.baseline_dir}")
-        print(f"INFO: Pinning: {pinning.pinning_desc}")
+        print(
+            "INFO: CPU affinity: "
+            f"selected_cores={cpu_context.run_core_count} cpus={cpu_context.cpu_list_desc}"
+        )
         return 0
     finally:
         cleanup_runtime_paths(runtime)
-
-
-def print_pinning_plan_tsv() -> int:
-    cfg = load_config()
-    plan = prepare_taskset_pinning(cfg)
-    print(plan.taskset_cpu_list)
-    print(plan.run_core_count)
-    print(plan.pinning_desc)
-    return 0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Discover optimal whisper model benchmark runner.")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="Run the full benchmark workflow.")
-    sub.add_parser("pinning-plan", help="Emit pinning plan as TSV (cpu_list, run_core_count, desc).")
     return parser
 
 
@@ -1075,11 +774,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "run":
             return run_benchmark()
-        if args.command == "pinning-plan":
-            return print_pinning_plan_tsv()
         parser.error("Unknown command")
         return 2
-    except (BenchmarkError, PinningError) as exc:
+    except BenchmarkError as exc:
         die(str(exc))
 
 
