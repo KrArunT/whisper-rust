@@ -106,6 +106,23 @@ def is_executable_path(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
 
+def resolve_python_bin() -> str:
+    env_python = os.getenv("BENCHMARK_PYTHON_BIN", "").strip()
+    if env_python:
+        return env_python
+
+    for candidate in (Path(".venv/bin/python"), Path("/opt/venv/bin/python"), Path(sys.executable)):
+        if is_executable_path(candidate):
+            return str(candidate)
+
+    for cmd in ("python", "python3"):
+        resolved = shutil.which(cmd)
+        if resolved:
+            return resolved
+
+    return sys.executable
+
+
 def resolve_rust_bench_cmd() -> tuple[str, ...]:
     env_cmd = os.getenv("RUST_BENCH_BIN", "").strip()
     if env_cmd:
@@ -146,7 +163,7 @@ def load_config() -> Config:
         model_progress_interval_sec=parse_int_env("MODEL_PROGRESS_INTERVAL_SEC", 30),
         baseline_model=os.getenv("BASELINE_MODEL", "base"),
         baseline_lang=os.getenv("BASELINE_LANG", "en"),
-        python_bin=os.getenv("BENCHMARK_PYTHON_BIN", sys.executable),
+        python_bin=resolve_python_bin(),
         rust_bench_cmd=resolve_rust_bench_cmd(),
         tokenizer_json=tokenizer_json,
     )
@@ -778,6 +795,7 @@ def run_benchmark() -> int:
         "INFO: Container CPU affinity context: "
         f"selected_cores={cpu_context.run_core_count} cpus={cpu_context.cpu_list_desc}"
     )
+    print(f"INFO: Python command: {cfg.python_bin}")
     print(f"INFO: Rust benchmark command: {' '.join(cfg.rust_bench_cmd)}")
     os.environ["RUN_CORE_COUNT"] = str(cpu_context.run_core_count)
 
