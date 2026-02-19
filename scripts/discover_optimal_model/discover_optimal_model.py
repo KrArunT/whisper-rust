@@ -6,6 +6,7 @@ import csv
 import dataclasses
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,7 @@ class Config:
     baseline_model: str
     baseline_lang: str
     python_bin: str
-    rust_bench_bin: str
+    rust_bench_cmd: tuple[str, ...]
     tokenizer_json: Path | None
 
 
@@ -101,6 +102,28 @@ def parse_int_env(name: str, default: int) -> int:
         raise BenchmarkError(f"{name} must be an integer (got '{raw}')") from exc
 
 
+def is_executable_path(path: Path) -> bool:
+    return path.is_file() and os.access(path, os.X_OK)
+
+
+def resolve_rust_bench_cmd() -> tuple[str, ...]:
+    env_cmd = os.getenv("RUST_BENCH_BIN", "").strip()
+    if env_cmd:
+        parsed = tuple(shlex.split(env_cmd))
+        if not parsed:
+            raise BenchmarkError("RUST_BENCH_BIN is set but empty after parsing.")
+        return parsed
+
+    if shutil.which("whisper_ort_bench") is not None:
+        return ("whisper_ort_bench",)
+    local_release = Path("target/release/whisper_ort_bench")
+    if is_executable_path(local_release):
+        return (str(local_release),)
+    if shutil.which("cargo") is not None:
+        return ("cargo", "run", "--release", "--")
+    return ("whisper_ort_bench",)
+
+
 def load_config() -> Config:
     models_root = Path(os.getenv("MODELS_ROOT", "models/whisper-base-optimized"))
     audio_dir = Path(os.getenv("AUDIO_DIR", "audio"))
@@ -124,7 +147,7 @@ def load_config() -> Config:
         baseline_model=os.getenv("BASELINE_MODEL", "base"),
         baseline_lang=os.getenv("BASELINE_LANG", "en"),
         python_bin=os.getenv("BENCHMARK_PYTHON_BIN", sys.executable),
-        rust_bench_bin=os.getenv("RUST_BENCH_BIN", "whisper_ort_bench"),
+        rust_bench_cmd=resolve_rust_bench_cmd(),
         tokenizer_json=tokenizer_json,
     )
     return cfg
@@ -146,7 +169,16 @@ def validate_benchmark_inputs(cfg: Config) -> None:
         raise BenchmarkError(f"No model directories found in: {cfg.models_root}")
 
     require_command(cfg.python_bin)
-    require_command(cfg.rust_bench_bin)
+    if not cfg.rust_bench_cmd:
+        raise BenchmarkError("Rust benchmark command is empty.")
+    try:
+        require_command(cfg.rust_bench_cmd[0])
+    except BenchmarkError as exc:
+        raise BenchmarkError(
+            f"{exc}\nSet RUST_BENCH_BIN explicitly, e.g. "
+            "'RUST_BENCH_BIN=\"target/release/whisper_ort_bench\"' or "
+            "'RUST_BENCH_BIN=\"cargo run --release --\"'."
+        ) from exc
     if not Path("/usr/bin/time").is_file():
         raise BenchmarkError("Required executable missing: /usr/bin/time")
     if cfg.tokenizer_json is not None and not cfg.tokenizer_json.is_file():
@@ -521,7 +553,7 @@ def run_model_benchmark(
     )
 
     rust_cmd: list[str] = [
-        cfg.rust_bench_bin,
+        *cfg.rust_bench_cmd,
         "--audio-dir",
         str(cfg.audio_dir),
         "--onnx-dir",
@@ -746,6 +778,7 @@ def run_benchmark() -> int:
         "INFO: Container CPU affinity context: "
         f"selected_cores={cpu_context.run_core_count} cpus={cpu_context.cpu_list_desc}"
     )
+    print(f"INFO: Rust benchmark command: {' '.join(cfg.rust_bench_cmd)}")
     os.environ["RUN_CORE_COUNT"] = str(cpu_context.run_core_count)
 
     runtime = initialize_runtime_paths(cfg)

@@ -74,6 +74,9 @@ BENCHMARK_LANG=en ./discover_optimal_model.sh
 
 # Override tokenizer path (default: ./tokenizer.json when present)
 TOKENIZER_JSON=tokenizer.json ./discover_optimal_model.sh
+
+# Override Rust benchmark command (auto-detects whisper_ort_bench, then target/release, then cargo run)
+RUST_BENCH_BIN="cargo run --release --" ./discover_optimal_model.sh
 ```
 
 ## Docker Reproducible Run (Recommended)
