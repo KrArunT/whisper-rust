@@ -90,6 +90,9 @@ docker build \
   -t whisper-rust-bench:latest .
 ```
 
+The image is intentionally dependency-focused; benchmark assets are read from the bind-mounted
+workspace at runtime so large model/audio directories are not baked into the image.
+
 Run with Docker CPU pinning (`--cpuset-cpus`):
 
 ```bash

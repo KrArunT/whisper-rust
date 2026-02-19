@@ -4,7 +4,8 @@ set -euo pipefail
 IMAGE_NAME="${IMAGE_NAME:-whisper-rust-bench:latest}"
 CPUSET_CPUS="${CPUSET_CPUS:-0-7}"
 
-docker build \
+DOCKER_BUILDKIT=1 docker build \
+  --cache-from "$IMAGE_NAME" \
   --build-arg UID="$(id -u)" \
   --build-arg GID="$(id -g)" \
   -t "$IMAGE_NAME" \

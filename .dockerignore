@@ -8,3 +8,6 @@ __pycache__
 *.pyo
 *.pyd
 results/benchmarks
+audio
+models
+results
